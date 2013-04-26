@@ -1,0 +1,1430 @@
+diff -r efa88d01b1ae admin11/easypack24_orders.php
+--- /dev/null	Thu Jan 01 00:00:00 1970 +0000
++++ b/admin11/easypack24_orders.php	Fri Apr 26 11:39:33 2013 +0200
+@@ -0,0 +1,509 @@
++<?php
++/**
++ * @package admin
++ * @copyright Copyright 2003-2011 Zen Cart Development Team
++ * @copyright Portions Copyright 2003 osCommerce
++ * @license http://www.zen-cart.com/license/2_0.txt GNU Public License V2.0
++ * @version $Id: orders.php 19530 2011-09-19 13:52:37Z ajeh $
++ */
++
++  require('includes/application_top.php');
++
++  require(DIR_WS_CLASSES . 'currencies.php');
++  $currencies = new currencies();
++
++  if (isset($_GET['oID'])) $_GET['oID'] = (int)$_GET['oID'];
++  if (isset($_GET['download_reset_on'])) $_GET['download_reset_on'] = (int)$_GET['download_reset_on'];
++  if (isset($_GET['download_reset_off'])) $_GET['download_reset_off'] = (int)$_GET['download_reset_off'];
++
++  include(DIR_WS_CLASSES . 'order.php');
++
++  // prepare order-status pulldown list
++  $orders_statuses = array();
++  $orders_status_array = array();
++  $orders_status = $db->Execute("select orders_status_id, orders_status_name
++                                 from " . TABLE_ORDERS_STATUS . "
++                                 where language_id = '" . (int)$_SESSION['languages_id'] . "' order by orders_status_id");
++  while (!$orders_status->EOF) {
++    $orders_statuses[] = array('id' => $orders_status->fields['orders_status_id'],
++                               'text' => $orders_status->fields['orders_status_name'] . ' [' . $orders_status->fields['orders_status_id'] . ']');
++    $orders_status_array[$orders_status->fields['orders_status_id']] = $orders_status->fields['orders_status_name'];
++    $orders_status->MoveNext();
++  }
++
++  $action = (isset($_GET['action']) ? $_GET['action'] : '');
++  $order_exists = false;
++  if (isset($_GET['oID']) && trim($_GET['oID']) == '') unset($_GET['oID']);
++
++  $oID = FALSE;
++  if (isset($_POST['oID'])) {
++    $oID = zen_db_prepare_input(trim($_POST['oID']));
++  } elseif (isset($_GET['oID'])) {
++    $oID = zen_db_prepare_input(trim($_GET['oID']));
++  }
++  if ($oID) {
++    $orders = $db->Execute("select orders_id from " . TABLE_ORDERS . "
++                              where orders_id = '" . (int)$oID . "'");
++    $order_exists = true;
++    if ($orders->RecordCount() <= 0) {
++      $order_exists = false;
++      if ($action != '') $messageStack->add_session(ERROR_ORDER_DOES_NOT_EXIST . ' ' . $oID, 'error');
++        zen_redirect(zen_href_link(FILENAME_EASYPACK24_ORDERS, zen_get_all_get_params(array('oID', 'action')), 'NONSSL'));
++    }
++  }
++
++  require_once('../' . DIR_WS_FUNCTIONS . 'easypack24.php');
++  $easypack24_helper = new Easypack24HelperData();
++  $apiKey = MODULE_SHIPPING_EASYPACK24_API_KEY;
++  $apiUrl = MODULE_SHIPPING_EASYPACK24_API_URL;
++
++  $easypack24_error = null;
++  if (zen_not_null($action) && $order_exists == true) {
++    $order = $db->Execute("select easypack24_parcel_id, easypack24_status, easypack24_parcel_size, customers_telephone, customers_email_address, delivery_name from " . TABLE_ORDERS . " where orders_id = '" . (int)$oID . "'")->fields;
++    switch ($action) {
++        case 'register':
++            $response = $easypack24_helper->registerParcel($apiKey, $apiUrl, $order['customers_telephone'], $order['customers_email_address'], $order['delivery_name'], 'A');
++            if (empty($response['error'])) {
++                $parcel_id = $response['id'];
++                $db->Execute("UPDATE " . TABLE_ORDERS . " SET easypack24_status = 'Created', easypack24_parcel_id = '" . $parcel_id . "', last_modified = NOW() WHERE orders_id = '" . (int)$oID . "'");
++            } else {
++                $easypack24_error = ERROR_EASYPACK24_REGISTRATION;
++            }
++            break;
++        case 'refresh':
++            $response = $easypack24_helper->refreshParcel($apiKey, $apiUrl, $order['easypack24_parcel_id']);
++            if (empty($response['error'])) {
++                $db->Execute("UPDATE " . TABLE_ORDERS . " SET easypack24_status = '" . $response['status'] . "', easypack24_parcel_size = '" . $response['parcelSize'] . "', last_modified = NOW() WHERE orders_id = '" . (int)$oID . "'");
++            } else {
++                $easypack24_error = ERROR_EASYPACK24_REFRESH;
++            }
++            break;
++        case 'cancel':
++            $response = $easypack24_helper->cancelParcel($apiKey, $apiUrl, $order['easypack24_parcel_id']);
++            if (empty($response['error'])) {
++                $db->Execute("UPDATE " . TABLE_ORDERS . " SET easypack24_status = 'Cancelled', last_modified = NOW() WHERE orders_id = '" . (int)$oID . "'");
++            } else {
++                $easypack24_error = ERROR_EASYPACK24_CANCEL;
++            }
++            break;
++        case 'sticker':
++            if ($order['easypack24_status'] == 'Created') {
++                $response = $easypack24_helper->payForParcel($apiKey, $apiUrl, $order['easypack24_parcel_id']);
++                if (empty($response['error'])) {
++                    $db->Execute("UPDATE " . TABLE_ORDERS . " SET easypack24_status = 'Prepared', last_modified = NOW() WHERE orders_id = '" . (int)$oID . "'");
++                } else {
++                    $easypack24_error = ERROR_EASYPACK24_PAY_FOR_PARCEL;
++                }
++            }
++            if (empty($easypack24_error)) {
++                $response = $easypack24_helper->getSticker($apiKey, $apiUrl, $order['easypack24_parcel_id']);
++                if (empty($response['error'])) {
++                    $pdf = $response['pdf'];
++
++                    header('Content-type: application/pdf');
++                    header('Content-Description: File Transfer');
++                    header('Content-Disposition: attachment; filename=order-' . $order['easypack24_parcel_id'] . '.pdf');
++                    header('Content-Transfer-Encoding: binary');
++                    header('Expires: 0');
++                    header('Cache-Control: must-revalidate, post-check=0, pre-check=0');
++                    header('Pragma: public');
++                    header('Content-Length: ' . strlen($pdf));
++
++                    echo $pdf;
++                } else {
++                    $easypack24_error = ERROR_EASYPACK24_STICKER;
++                }
++            }
++            break;
++    }
++  }
++?>
++<!doctype html public "-//W3C//DTD HTML 4.01 Transitional//EN">
++<html <?php echo HTML_PARAMS; ?>>
++<head>
++<meta http-equiv="Content-Type" content="text/html; charset=<?php echo CHARSET; ?>">
++<title><?php echo TITLE; ?></title>
++<link rel="stylesheet" type="text/css" href="includes/stylesheet.css">
++<link rel="stylesheet" type="text/css" media="print" href="includes/stylesheet_print.css">
++<link rel="stylesheet" type="text/css" href="includes/cssjsmenuhover.css" media="all" id="hoverJS">
++<script language="javascript" src="includes/menu.js"></script>
++<script language="javascript" src="includes/general.js"></script>
++<script type="text/javascript">
++  <!--
++  function init()
++  {
++    cssjsmenu('navbar');
++    if (document.getElementById)
++    {
++      var kill = document.getElementById('hoverJS');
++      kill.disabled = true;
++    }
++  }
++  // -->
++</script>
++<script language="javascript" type="text/javascript"><!--
++function couponpopupWindow(url) {
++  window.open(url,'popupWindow','toolbar=no,location=no,directories=no,status=no,menubar=no,scrollbars=yes,resizable=yes,copyhistory=no,width=450,height=280,screenX=150,screenY=150,top=150,left=150')
++}
++//--></script>
++</head>
++<body onLoad="init()">
++<!-- header //-->
++<div class="header-area">
++<?php
++  require(DIR_WS_INCLUDES . 'header.php');
++?>
++</div>
++<!-- header_eof //-->
++
++<!-- body //-->
++<table border="0" width="100%" cellspacing="2" cellpadding="2">
++<!-- body_text //-->
++
++<?php if ($action == '') { ?>
++<!-- search -->
++  <tr>
++    <td width="100%" valign="top"><table border="0" width="100%" cellspacing="0" cellpadding="2">
++      <tr>
++        <td><table border="0" width="100%" cellspacing="0" cellpadding="0">
++         <tr><?php echo zen_draw_form('search', FILENAME_EASYPACK24_ORDERS, '', 'get', '', true); ?>
++            <td width="65%" class="pageHeading" align="right"><?php echo zen_draw_separator('pixel_trans.gif', 1, HEADING_IMAGE_HEIGHT); ?></td>
++            <td colspan="2" class="smallText" align="right">
++<?php
++// show reset search
++  if ((isset($_GET['search']) && zen_not_null($_GET['search'])) or $_GET['cID'] !='') {
++    echo '<a href="' . zen_href_link(FILENAME_EASYPACK24_ORDERS, '', 'NONSSL') . '">' . zen_image_button('button_reset.gif', IMAGE_RESET) . '</a><br />';
++  }
++?>
++<?php
++  echo HEADING_TITLE_SEARCH_DETAIL . ' ' . zen_draw_input_field('search') . zen_hide_session_id();
++  if (isset($_GET['search']) && zen_not_null($_GET['search'])) {
++    $keywords = zen_db_input(zen_db_prepare_input($_GET['search']));
++    echo '<br/ >' . TEXT_INFO_SEARCH_DETAIL_FILTER . $keywords;
++  }
++?>
++            </td>
++          </form>
++
++
++         <?php echo zen_draw_form('search_orders_products', FILENAME_EASYPACK24_ORDERS, '', 'get', '', true); ?>
++            <td class="pageHeading" align="right"><?php echo zen_draw_separator('pixel_trans.gif', 1, HEADING_IMAGE_HEIGHT); ?></td>
++            <td colspan="2" class="smallText" align="right">
++<?php
++// show reset search orders_products
++  if ((isset($_GET['search_orders_products']) && zen_not_null($_GET['search_orders_products'])) or $_GET['cID'] !='') {
++    echo '<a href="' . zen_href_link(FILENAME_EASYPACK24_ORDERS, '', 'NONSSL') . '">' . zen_image_button('button_reset.gif', IMAGE_RESET) . '</a><br />';
++  }
++?>
++<?php
++  echo HEADING_TITLE_SEARCH_DETAIL_ORDERS_PRODUCTS . ' ' . zen_draw_input_field('search_orders_products') . zen_hide_session_id();
++  if (isset($_GET['search_orders_products']) && zen_not_null($_GET['search_orders_products'])) {
++    $keywords_orders_products = zen_db_input(zen_db_prepare_input($_GET['search_orders_products']));
++    echo '<br/ >' . TEXT_INFO_SEARCH_DETAIL_FILTER_ORDERS_PRODUCTS . zen_db_prepare_input($keywords_orders_products);
++  }
++?>
++            </td>
++          </form>
++
++        </table></td>
++      </tr>
++<!-- search -->
++<?php } ?>
++
++
++      <tr>
++        <td width="100%"><table border="0" width="100%" cellspacing="0" cellpadding="0">
++          <tr>
++            <td class="pageHeading"><?php echo HEADING_TITLE; ?>
++                <?php
++                if (!empty($easypack24_error)) {
++                    echo " <span class=\"errorText\"><strong>$easypack24_error</strong></span>";
++                }
++                ?>
++            </td>
++            <td class="pageHeading" align="right"><?php echo zen_draw_separator('pixel_trans.gif', 1, HEADING_IMAGE_HEIGHT); ?></td>
++            <td align="right"><table border="0" width="100%" cellspacing="0" cellpadding="0">
++              <tr><?php echo zen_draw_form('orders', FILENAME_EASYPACK24_ORDERS, '', 'get', '', true); ?>
++                <td class="smallText" align="right"><?php echo HEADING_TITLE_SEARCH . ' ' . zen_draw_input_field('oID', '', 'size="12"') . zen_draw_hidden_field('action', 'edit') . zen_hide_session_id(); ?></td>
++              </form></tr>
++              <tr><?php echo zen_draw_form('status', FILENAME_EASYPACK24_ORDERS, '', 'get', '', true); ?>
++                <td class="smallText" align="right">
++                  <?php
++                    echo HEADING_TITLE_STATUS . ' ' . zen_draw_pull_down_menu('status', array_merge(array(array('id' => '', 'text' => TEXT_ALL_ORDERS)), $orders_statuses), $_GET['status'], 'onChange="this.form.submit();"');
++                    echo zen_hide_session_id();
++                  ?>
++                </td>
++              </form></tr>
++            </table></td>
++          </tr>
++        </table></td>
++      </tr>
++      <tr>
++        <td><table border="0" width="100%" cellspacing="0" cellpadding="0">
++          <tr>
++            <td class="smallText"><?php echo TEXT_LEGEND . ' ' . zen_image(DIR_WS_IMAGES . 'icon_status_red.gif', TEXT_BILLING_SHIPPING_MISMATCH, 10, 10) . ' ' . TEXT_BILLING_SHIPPING_MISMATCH; ?>
++          </td>
++          <tr>
++            <td valign="top"><table border="0" width="100%" cellspacing="0" cellpadding="2">
++              <tr class="dataTableHeadingRow">
++<?php
++// Sort Listing
++          switch ($_GET['list_order']) {
++              case "id-asc":
++              $disp_order = "c.customers_id";
++              break;
++              case "firstname":
++              $disp_order = "c.customers_firstname";
++              break;
++              case "firstname-desc":
++              $disp_order = "c.customers_firstname DESC";
++              break;
++              case "lastname":
++              $disp_order = "c.customers_lastname, c.customers_firstname";
++              break;
++              case "lastname-desc":
++              $disp_order = "c.customers_lastname DESC, c.customers_firstname";
++              break;
++              case "company":
++              $disp_order = "a.entry_company";
++              break;
++              case "company-desc":
++              $disp_order = "a.entry_company DESC";
++              break;
++              default:
++              $disp_order = "c.customers_id DESC";
++          }
++?>
++                <td class="dataTableHeadingContent" align="center"><?php echo TABLE_HEADING_ORDERS_ID; ?></td>
++                <td class="dataTableHeadingContent" align="left" width="50"><?php echo TABLE_HEADING_PARCEL_ID; ?></td>
++                <td class="dataTableHeadingContent" align="left"><?php echo TABLE_HEADING_EASYPACK24_STATUS; ?></td>
++                <td class="dataTableHeadingContent" align="left"><?php echo TABLE_HEADING_PARCEL_SIZE; ?></td>
++                <td class="dataTableHeadingContent" align="left"><?php echo TABLE_HEADING_STATUS; ?></td>
++                <td class="dataTableHeadingContent" align="left"><?php echo TABLE_HEADING_MACHINE_ID; ?></td>
++                <td class="dataTableHeadingContent" align="left"><?php echo TABLE_HEADING_DATE_PURCHASED; ?></td>
++                <td class="dataTableHeadingContent" align="left"><?php echo TABLE_HEADING_DATE_MODIFIED; ?></td>
++                <td class="dataTableHeadingContent" align="right"><?php echo TABLE_HEADING_VIEW; ?>&nbsp;</td>
++              </tr>
++
++<?php
++// Only one or the other search
++// create search_orders_products filter
++  $search = '';
++  $new_table = '';
++  $new_fields = '';
++  if (isset($_GET['search_orders_products']) && zen_not_null($_GET['search_orders_products'])) {
++    $new_fields = '';
++    $search_distinct = ' distinct ';
++    $new_table = " left join " . TABLE_ORDERS_PRODUCTS . " op on (op.orders_id = o.orders_id) ";
++    $keywords = zen_db_input(zen_db_prepare_input($_GET['search_orders_products']));
++    $search = " and (op.products_model like '%" . $keywords . "%' or op.products_name like '" . $keywords . "%')";
++    if (substr(strtoupper($_GET['search_orders_products']), 0, 3) == 'ID:') {
++      $keywords = TRIM(substr($_GET['search_orders_products'], 3));
++      $search = " and op.products_id ='" . (int)$keywords . "'";
++    }
++  } else {
++?>
++<?php
++// create search filter
++  $search = '';
++  if (isset($_GET['search']) && zen_not_null($_GET['search'])) {
++    $search_distinct = ' ';
++    $keywords = zen_db_input(zen_db_prepare_input($_GET['search']));
++    $search = " and (o.customers_city like '%" . $keywords . "%' or o.customers_postcode like '%" . $keywords . "%' or o.date_purchased like '%" . $keywords . "%' or o.billing_name like '%" . $keywords . "%' or o.billing_company like '%" . $keywords . "%' or o.billing_street_address like '%" . $keywords . "%' or o.delivery_city like '%" . $keywords . "%' or o.delivery_postcode like '%" . $keywords . "%' or o.delivery_name like '%" . $keywords . "%' or o.delivery_company like '%" . $keywords . "%' or o.delivery_street_address like '%" . $keywords . "%' or o.billing_city like '%" . $keywords . "%' or o.billing_postcode like '%" . $keywords . "%' or o.customers_email_address like '%" . $keywords . "%' or o.customers_name like '%" . $keywords . "%' or o.customers_company like '%" . $keywords . "%' or o.customers_street_address  like '%" . $keywords . "%' or o.customers_telephone like '%" . $keywords . "%' or o.ip_address  like '%" . $keywords . "%')";
++    $new_table = '';
++//    $new_fields = ", o.customers_company, o.customers_email_address, o.customers_street_address, o.delivery_company, o.delivery_name, o.delivery_street_address, o.billing_company, o.billing_name, o.billing_street_address, o.payment_module_code, o.shipping_module_code, o.ip_address ";
++  }
++} // eof: search orders or orders_products
++    $new_fields = ", o.customers_company, o.customers_email_address, o.customers_street_address, o.delivery_company, o.delivery_name, o.delivery_street_address, o.billing_company, o.billing_name, o.billing_street_address, o.payment_module_code, o.shipping_module_code, o.ip_address ";
++?>
++<?php
++    $shippingSql = "o.shipping_module_code = 'easypack24'";
++
++    if (isset($_GET['cID'])) {
++      $cID = zen_db_prepare_input($_GET['cID']);
++      $orders_query_raw =   "select o.easypack24_parcel_id, o.easypack24_status, o.easypack24_parcel_size, o.orders_id, o.customers_id, o.customers_name, o.payment_method, o.shipping_method, o.date_purchased, o.last_modified, o.currency, o.currency_value, s.orders_status_name, ot.text as order_total" .
++                            $new_fields . "
++                            from (" . TABLE_ORDERS_STATUS . " s, " .
++                            TABLE_ORDERS . " o " .
++                            $new_table . ")
++                            left join " . TABLE_ORDERS_TOTAL . " ot on (o.orders_id = ot.orders_id and ot.class = 'ot_total') " . "
++                            where $shippingSql and o.customers_id = '" . (int)$cID . "' and o.orders_status = s.orders_status_id and s.language_id = '" . (int)$_SESSION['languages_id'] . "' order by orders_id DESC";
++
++//echo '<BR><BR>I SEE A: ' . $orders_query_raw . '<BR><BR>';
++
++    } elseif ($_GET['status'] != '') {
++      $status = zen_db_prepare_input($_GET['status']);
++      $orders_query_raw = "select o.easypack24_parcel_id, o.easypack24_status, o.easypack24_parcel_size, o.orders_id, o.customers_id, o.customers_name, o.payment_method, o.shipping_method, o.date_purchased, o.last_modified, o.currency, o.currency_value, s.orders_status_name, ot.text as order_total" .
++                          $new_fields . "
++                          from (" . TABLE_ORDERS_STATUS . " s, " .
++                          TABLE_ORDERS . " o " .
++                          $new_table . ")
++                          left join " . TABLE_ORDERS_TOTAL . " ot on (o.orders_id = ot.orders_id and ot.class = 'ot_total') " . "
++                          where $shippingSql and o.orders_status = s.orders_status_id and s.language_id = '" . (int)$_SESSION['languages_id'] . "' and s.orders_status_id = '" . (int)$status . "'  " .
++                          $search . " order by o.orders_id DESC";
++
++//echo '<BR><BR>I SEE B: ' . $orders_query_raw . '<BR><BR>';
++
++    } else {
++      $orders_query_raw = "select " . $search_distinct . " o.easypack24_parcel_id, o.easypack24_status, o.easypack24_parcel_size, o.orders_id, o.customers_id, o.customers_name, o.payment_method, o.shipping_method, o.date_purchased, o.last_modified, o.currency, o.currency_value, s.orders_status_name, ot.text as order_total" .
++                          $new_fields . "
++                          from (" . TABLE_ORDERS_STATUS . " s, " .
++                          TABLE_ORDERS . " o " .
++                          $new_table . ")
++                          left join " . TABLE_ORDERS_TOTAL . " ot on (o.orders_id = ot.orders_id and ot.class = 'ot_total') " . "
++                          where $shippingSql and (o.orders_status = s.orders_status_id and s.language_id = '" . (int)$_SESSION['languages_id'] . "')  " .
++                          $search . " order by o.orders_id DESC";
++
++//echo '<BR><BR>I SEE C: ' . $orders_query_raw . '<BR><BR>';
++
++    }
++
++// Split Page
++// reset page when page is unknown
++if (($_GET['page'] == '' or $_GET['page'] <= 1) and $_GET['oID'] != '') {
++  $check_page = $db->Execute($orders_query_raw);
++  $check_count=1;
++  if ($check_page->RecordCount() > MAX_DISPLAY_SEARCH_RESULTS_ORDERS) {
++    while (!$check_page->EOF) {
++      if ($check_page->fields['orders_id'] == $_GET['oID']) {
++        break;
++      }
++      $check_count++;
++      $check_page->MoveNext();
++    }
++    $_GET['page'] = round((($check_count/MAX_DISPLAY_SEARCH_RESULTS_ORDERS)+(fmod_round($check_count,MAX_DISPLAY_SEARCH_RESULTS_ORDERS) !=0 ? .5 : 0)),0);
++  } else {
++    $_GET['page'] = 1;
++  }
++}
++
++//    $orders_query_numrows = '';
++    $orders_split = new splitPageResults($_GET['page'], MAX_DISPLAY_SEARCH_RESULTS_ORDERS, $orders_query_raw, $orders_query_numrows);
++    $orders = $db->Execute($orders_query_raw);
++    while (!$orders->EOF) {
++    if ((!isset($_GET['oID']) || (isset($_GET['oID']) && ($_GET['oID'] == $orders->fields['orders_id']))) && !isset($oInfo)) {
++        $oInfo = new objectInfo($orders->fields);
++      }
++
++      if (isset($oInfo) && is_object($oInfo) && ($orders->fields['orders_id'] == $oInfo->orders_id)) {
++        echo '              <tr id="defaultSelected" class="dataTableRowSelected" onmouseover="rowOverEffect(this)" onmouseout="rowOutEffect(this)" onclick="document.location.href=\'' . zen_href_link(FILENAME_EASYPACK24_ORDERS, zen_get_all_get_params(array('oID', 'action')) . 'oID=' . $oInfo->orders_id, 'NONSSL') . '\'">' . "\n";
++      } else {
++        echo '              <tr class="dataTableRow" onmouseover="rowOverEffect(this)" onmouseout="rowOutEffect(this)" onclick="document.location.href=\'' . zen_href_link(FILENAME_EASYPACK24_ORDERS, zen_get_all_get_params(array('oID', 'action')) . 'oID=' . $orders->fields['orders_id'], 'NONSSL') . '\'">' . "\n";
++      }
++
++      $show_payment_type = $orders->fields['payment_module_code'] . '<br />' . $orders->fields['shipping_module_code'];
++?>
++                <td class="dataTableContent" align="center"><?php echo $orders->fields['orders_id']; ?></td>
++                <td class="dataTableContent" align="left" width="150"><?php echo $orders->fields['easypack24_parcel_id']; ?></td>
++                <td class="dataTableContent" align="left" width="50"><?php echo $orders->fields['easypack24_status']; ?></td>
++                <td class="dataTableContent" align="left" width="150"><?php echo $orders->fields['easypack24_parcel_size']; ?></td>
++                <td class="dataTableContent" align="left" width="150"><?php echo $orders->fields['orders_status_name']; ?></td>
++                <td class="dataTableContent" align="left" width="200"><?php echo $orders->fields['delivery_name']; ?></td>
++                <td class="dataTableContent" align="left"><?php echo zen_datetime_short($orders->fields['date_purchased']); ?></td>
++                <td class="dataTableContent" align="left"><?php echo zen_datetime_short($orders->fields['last_modified']); ?></td>
++
++                <td class="dataTableContent" align="right"><?php if (isset($oInfo) && is_object($oInfo) && ($orders->fields['orders_id'] == $oInfo->orders_id)) { echo zen_image(DIR_WS_IMAGES . 'icon_arrow_right.gif', ''); } else { echo '<a href="' . zen_href_link(FILENAME_EASYPACK24_ORDERS, zen_get_all_get_params(array('oID', 'action')) . 'oID=' . $orders->fields['orders_id'], 'NONSSL') . '">' . zen_image(DIR_WS_IMAGES . 'icon_info.gif', IMAGE_ICON_INFO) . '</a>'; } ?>&nbsp;</td>
++              </tr>
++<?php
++      $orders->MoveNext();
++    }
++?>
++              <tr>
++                <td colspan="5"><table border="0" width="100%" cellspacing="0" cellpadding="2">
++                  <tr>
++                    <td class="smallText" valign="top"><?php echo $orders_split->display_count($orders_query_numrows, MAX_DISPLAY_SEARCH_RESULTS_ORDERS, $_GET['page'], TEXT_DISPLAY_NUMBER_OF_ORDERS); ?></td>
++                    <td class="smallText" align="right"><?php echo $orders_split->display_links($orders_query_numrows, MAX_DISPLAY_SEARCH_RESULTS_ORDERS, MAX_DISPLAY_PAGE_LINKS, $_GET['page'], zen_get_all_get_params(array('page', 'oID', 'action'))); ?></td>
++                  </tr>
++<?php
++  if (isset($_GET['search']) && zen_not_null($_GET['search'])) {
++?>
++                  <tr>
++                    <td class="smallText" align="right" colspan="2">
++                      <?php
++                        echo '<a href="' . zen_href_link(FILENAME_EASYPACK24_ORDERS, '', 'NONSSL') . '">' . zen_image_button('button_reset.gif', IMAGE_RESET) . '</a>';
++                        if (isset($_GET['search']) && zen_not_null($_GET['search'])) {
++                          $keywords = zen_db_input(zen_db_prepare_input($_GET['search']));
++                          echo '<br/ >' . TEXT_INFO_SEARCH_DETAIL_FILTER . $keywords;
++                        }
++                      ?>
++                    </td>
++                  </tr>
++<?php
++  }
++?>
++                </table></td>
++              </tr>
++            </table></td>
++<?php
++  $heading = array();
++  $contents = array();
++
++  if (isset($oInfo) && is_object($oInfo)) {
++    $heading[] = array('text' => '<strong>[' . $oInfo->orders_id . ']&nbsp;&nbsp;' . zen_datetime_short($oInfo->date_purchased) . '</strong>');
++
++    if (empty($oInfo->easypack24_parcel_id) || $oInfo->easypack24_status == 'Cancelled') {
++        $contents[] = array('align' => 'center', 'text' => '<a href="' . zen_href_link(FILENAME_EASYPACK24_ORDERS, zen_get_all_get_params(array('oID', 'action')) . 'oID=' . $oInfo->orders_id . '&action=register', 'NONSSL') . '">' . zen_image_button('button_register.gif', IMAGE_EASYPACK24_ORDERS_REGISTER) . '</a>');
++    } else if (!empty($oInfo->easypack24_status)) {
++        if ($oInfo->easypack24_status == 'Created') {
++            $contents[] = array('align' => 'center', 'text' => '<a href="' . zen_href_link(FILENAME_EASYPACK24_ORDERS, zen_get_all_get_params(array('oID', 'action')) . 'oID=' . $oInfo->orders_id . '&action=cancel', 'NONSSL') . '">' . zen_image_button('button_cancel.gif', IMAGE_EASYPACK24_ORDERS_CANCEL) . '</a>');
++        }
++        $contents[] = array('align' => 'center', 'text' => '<a href="' . zen_href_link(FILENAME_EASYPACK24_ORDERS, zen_get_all_get_params(array('oID', 'action')) . 'oID=' . $oInfo->orders_id . '&action=refresh', 'NONSSL') . '">' . zen_image_button('button_refresh.gif', IMAGE_EASYPACK24_ORDERS_REFRESH) . '</a> <a href="' . zen_href_link(FILENAME_EASYPACK24_ORDERS, zen_get_all_get_params(array('oID', 'action')) . 'oID=' . $oInfo->orders_id . '&action=sticker', 'NONSSL') . '" TARGET="_blank">' . zen_image_button('button_sticker.gif', IMAGE_EASYPACK24_ORDERS_STICKER) . '</a>');
++    }
++    $contents[] = array('text' => '<br />' . TEXT_DATE_ORDER_CREATED . ' ' . zen_date_short($oInfo->date_purchased));
++    $contents[] = array('text' => '<br />' . $oInfo->customers_email_address);
++    $contents[] = array('text' => TEXT_INFO_IP_ADDRESS . ' ' . $oInfo->ip_address);
++    if (zen_not_null($oInfo->last_modified)) $contents[] = array('text' => TEXT_DATE_ORDER_LAST_MODIFIED . ' ' . zen_date_short($oInfo->last_modified));
++    $contents[] = array('text' => '<br />' . TEXT_INFO_PAYMENT_METHOD . ' '  . $oInfo->payment_method);
++    $contents[] = array('text' => '<br />' . ENTRY_SHIPPING . ' '  . $oInfo->shipping_method);
++  }
++
++  // indicate if comments exist
++  $orders_history_query = $db->Execute("select orders_status_id, date_added, customer_notified, comments from " . TABLE_ORDERS_STATUS_HISTORY . " where orders_id = '" . $oInfo->orders_id . "' and comments !='" . "'" );
++  if ($orders_history_query->RecordCount() > 0) {
++    $contents[] = array('align' => 'left', 'text' => '<br />' . TABLE_HEADING_COMMENTS);
++  }
++
++  $contents[] = array('text' => '<br />' . zen_image(DIR_WS_IMAGES . 'pixel_black.gif','','100%','3'));
++  $order = new order($oInfo->orders_id);
++  $contents[] = array('text' => 'Products Ordered: ' . sizeof($order->products) );
++  for ($i=0; $i<sizeof($order->products); $i++) {
++    $contents[] = array('text' => $order->products[$i]['qty'] . '&nbsp;x&nbsp;' . $order->products[$i]['name']);
++
++    if (sizeof($order->products[$i]['attributes']) > 0) {
++      for ($j=0; $j<sizeof($order->products[$i]['attributes']); $j++) {
++        $contents[] = array('text' => '&nbsp;<i> - ' . $order->products[$i]['attributes'][$j]['option'] . ': ' . nl2br(zen_output_string_protected($order->products[$i]['attributes'][$j]['value'])) . '</i></nobr>' );
++      }
++    }
++    if ($i > MAX_DISPLAY_RESULTS_ORDERS_DETAILS_LISTING and MAX_DISPLAY_RESULTS_ORDERS_DETAILS_LISTING != 0) {
++      $contents[] = array('align' => 'left', 'text' => TEXT_MORE);
++      break;
++    }
++  }
++
++  if ( (zen_not_null($heading)) && (zen_not_null($contents)) ) {
++    echo '            <td width="25%" valign="top">' . "\n";
++
++    $box = new box;
++    echo $box->infoBox($heading, $contents);
++
++    echo '            </td>' . "\n";
++  }
++?>
++          </tr>
++        </table></td>
++      </tr>
++    </table></td>
++<!-- body_text_eof //-->
++  </tr>
++</table>
++<!-- body_eof //-->
++
++<!-- footer //-->
++<div class="footer-area">
++<?php require(DIR_WS_INCLUDES . 'footer.php'); ?>
++</div>
++<!-- footer_eof //-->
++<br />
++</body>
++</html>
++<?php require(DIR_WS_INCLUDES . 'application_bottom.php'); ?>
+diff -r efa88d01b1ae admin11/includes/languages/english.php
+--- a/admin11/includes/languages/english.php	Mon Mar 25 10:41:56 2013 +0100
++++ b/admin11/includes/languages/english.php	Fri Apr 26 11:39:33 2013 +0200
+@@ -140,6 +140,7 @@
+ define('BOX_HEADING_CUSTOMERS', 'Customers');
+ define('BOX_CUSTOMERS_CUSTOMERS', 'Customers');
+ define('BOX_CUSTOMERS_ORDERS', 'Orders');
++define('BOX_CUSTOMERS_EASYPACK24_ORDERS', 'InPost Parcel Lockers 24/7');
+ define('BOX_CUSTOMERS_GROUP_PRICING', 'Group Pricing');
+ define('BOX_CUSTOMERS_PAYPAL', 'PayPal IPN');
+ define('BOX_CUSTOMERS_INVOICE', 'Invoice');
+@@ -305,6 +306,10 @@
+ define('IMAGE_DETAILS', 'Details');
+ define('IMAGE_DELETE', 'Delete');
+ define('IMAGE_EDIT', 'Edit');
++define('IMAGE_EASYPACK24_ORDERS_REGISTER', 'Register');
++define('IMAGE_EASYPACK24_ORDERS_CANCEL', 'Cancel');
++define('IMAGE_EASYPACK24_ORDERS_REFRESH', 'Refresh');
++define('IMAGE_EASYPACK24_ORDERS_STICKER', 'PDF Sticker');
+ define('IMAGE_EMAIL', 'Email');
+ define('IMAGE_GO', 'Go');
+ define('IMAGE_FILE_MANAGER', 'File Manager');
+diff -r efa88d01b1ae admin11/includes/languages/english/easypack24_orders.php
+--- /dev/null	Thu Jan 01 00:00:00 1970 +0000
++++ b/admin11/includes/languages/english/easypack24_orders.php	Fri Apr 26 11:39:33 2013 +0200
+@@ -0,0 +1,132 @@
++<?php
++/**
++ * @package admin
++ * @copyright Copyright 2003-2007 Zen Cart Development Team
++ * @copyright Portions Copyright 2003 osCommerce
++ * @license http://www.zen-cart.com/license/2_0.txt GNU Public License V2.0
++ * @version $Id: orders.php 6214 2007-04-17 02:24:25Z ajeh $
++ */
++
++define('TABLE_HEADING_PARCEL_ID', 'Parcel Id');
++define('TABLE_HEADING_PARCEL_SIZE', 'Parcel Size');
++define('TABLE_HEADING_MACHINE_ID', 'Machine Id');
++define('TABLE_HEADING_EASYPACK24_STATUS', 'Easypack24 Status');
++define('TABLE_HEADING_DATE_MODIFIED', 'Last Modification Date');
++define('TABLE_HEADING_VIEW', 'View');
++define('ERROR_EASYPACK24_REGISTRATION', 'There was an error in the registration process');
++define('ERROR_EASYPACK24_REFRESH', 'Registration could not be refreshed');
++define('ERROR_EASYPACK24_CANCEL', 'Registration could not be cancelled');
++define('ERROR_EASYPACK24_STICKER', 'There was an error while getting sticker');
++define('ERROR_EASYPACK24_PAY_FOR_PARCEL', 'There was an error while paying for parcel');
++
++define('HEADING_TITLE', 'Orders');
++define('HEADING_TITLE_SEARCH', 'Order ID:');
++define('HEADING_TITLE_STATUS', 'Status:');
++define('HEADING_TITLE_SEARCH_DETAIL_ORDERS_PRODUCTS', 'Search by Product Name or <strong>ID:XX</strong> or Model ');
++define('TEXT_INFO_SEARCH_DETAIL_FILTER_ORDERS_PRODUCTS', 'Search Filter: ');
++define('TABLE_HEADING_ORDERS_ID','ID');
++
++define('TEXT_BILLING_SHIPPING_MISMATCH','Billing and Shipping does not match ');
++
++define('TABLE_HEADING_COMMENTS', 'Comments');
++define('TABLE_HEADING_CUSTOMERS', 'Customers');
++define('TABLE_HEADING_ORDER_TOTAL', 'Order Total');
++define('TABLE_HEADING_DATE_PURCHASED', 'Date Purchased');
++define('TABLE_HEADING_STATUS', 'Status');
++define('TABLE_HEADING_TYPE', 'Order Type');
++define('TABLE_HEADING_ACTION', 'Action');
++define('TABLE_HEADING_QUANTITY', 'Qty.');
++define('TABLE_HEADING_PRODUCTS_MODEL', 'Model');
++define('TABLE_HEADING_PRODUCTS', 'Products');
++define('TABLE_HEADING_TAX', 'Tax');
++define('TABLE_HEADING_TOTAL', 'Total');
++define('TABLE_HEADING_PRICE_EXCLUDING_TAX', 'Price (ex)');
++define('TABLE_HEADING_PRICE_INCLUDING_TAX', 'Price (inc)');
++define('TABLE_HEADING_TOTAL_EXCLUDING_TAX', 'Total (ex)');
++define('TABLE_HEADING_TOTAL_INCLUDING_TAX', 'Total (inc)');
++
++define('TABLE_HEADING_CUSTOMER_NOTIFIED', 'Customer Notified');
++define('TABLE_HEADING_DATE_ADDED', 'Date Added');
++
++define('ENTRY_CUSTOMER', 'Customer:');
++define('ENTRY_SOLD_TO', 'SOLD TO:');
++define('ENTRY_DELIVERY_TO', 'Delivery To:');
++define('ENTRY_SHIP_TO', 'SHIP TO:');
++define('ENTRY_SHIPPING_ADDRESS', 'Shipping Address:');
++define('ENTRY_BILLING_ADDRESS', 'Billing Address:');
++define('ENTRY_PAYMENT_METHOD', 'Payment Method:');
++define('ENTRY_CREDIT_CARD_TYPE', 'Credit Card Type:');
++define('ENTRY_CREDIT_CARD_OWNER', 'Credit Card Owner:');
++define('ENTRY_CREDIT_CARD_NUMBER', 'Credit Card Number:');
++define('ENTRY_CREDIT_CARD_CVV', 'Credit Card CVV Number:');
++define('ENTRY_CREDIT_CARD_EXPIRES', 'Credit Card Expires:');
++define('ENTRY_SUB_TOTAL', 'Sub-Total:');
++define('ENTRY_TAX', 'Tax:');
++define('ENTRY_SHIPPING', 'Shipping:');
++define('ENTRY_TOTAL', 'Total:');
++define('ENTRY_DATE_PURCHASED', 'Date Purchased:');
++define('ENTRY_STATUS', 'Status:');
++define('ENTRY_DATE_LAST_UPDATED', 'Date Last Updated:');
++define('ENTRY_NOTIFY_CUSTOMER', 'Notify Customer:');
++define('ENTRY_NOTIFY_COMMENTS', 'Append Comments:');
++define('ENTRY_PRINTABLE', 'Print Invoice');
++
++define('TEXT_INFO_HEADING_DELETE_ORDER', 'Delete Order');
++define('TEXT_INFO_DELETE_INTRO', 'Are you sure you want to delete this order?');
++define('TEXT_INFO_RESTOCK_PRODUCT_QUANTITY', 'Restock product quantity');
++define('TEXT_DATE_ORDER_CREATED', 'Date Created:');
++define('TEXT_DATE_ORDER_LAST_MODIFIED', 'Last Modified:');
++define('TEXT_INFO_PAYMENT_METHOD', 'Payment Method:');
++define('TEXT_PAID', 'Paid');
++define('TEXT_UNPAID', 'Un-paid');
++
++define('TEXT_ALL_ORDERS', 'All Orders');
++define('TEXT_NO_ORDER_HISTORY', 'No Order History Available');
++
++define('EMAIL_SEPARATOR', '------------------------------------------------------');
++define('EMAIL_TEXT_SUBJECT', 'Order Update');
++define('EMAIL_TEXT_ORDER_NUMBER', 'Order Number:');
++define('EMAIL_TEXT_INVOICE_URL', 'Detailed Invoice:');
++define('EMAIL_TEXT_DATE_ORDERED', 'Date Ordered:');
++define('EMAIL_TEXT_COMMENTS_UPDATE', '<em>The comments for your order are: </em>');
++define('EMAIL_TEXT_STATUS_UPDATED', 'Your order has been updated to the following status:' . "\n");
++define('EMAIL_TEXT_STATUS_LABEL', '<strong>New status:</strong> %s' . "\n\n");
++define('EMAIL_TEXT_STATUS_PLEASE_REPLY', 'Please reply to this email if you have any questions.' . "\n");
++
++define('ERROR_ORDER_DOES_NOT_EXIST', 'Error: Order does not exist.');
++define('SUCCESS_ORDER_UPDATED', 'Success: Order has been successfully updated.');
++define('WARNING_ORDER_NOT_UPDATED', 'Warning: Nothing to change. The order was not updated.');
++
++define('ENTRY_ORDER_ID','Invoice No. ');
++define('TEXT_INFO_ATTRIBUTE_FREE', '&nbsp;-&nbsp;<span class="alert">FREE</span>');
++
++define('TEXT_DOWNLOAD_TITLE', 'Order Download Status');
++define('TEXT_DOWNLOAD_STATUS', 'Status');
++define('TEXT_DOWNLOAD_FILENAME', 'Filename');
++define('TEXT_DOWNLOAD_MAX_DAYS', 'Days');
++define('TEXT_DOWNLOAD_MAX_COUNT', 'Count');
++
++define('TEXT_DOWNLOAD_AVAILABLE', 'Available');
++define('TEXT_DOWNLOAD_EXPIRED', 'Expired');
++define('TEXT_DOWNLOAD_MISSING', 'Not on Server');
++
++define('IMAGE_ICON_STATUS_CURRENT', 'Status - Available');
++define('IMAGE_ICON_STATUS_EXPIRED', 'Status - Expired');
++define('IMAGE_ICON_STATUS_MISSING', 'Status - Missing');
++
++define('SUCCESS_ORDER_UPDATED_DOWNLOAD_ON', 'Download was successfully enabled');
++define('SUCCESS_ORDER_UPDATED_DOWNLOAD_OFF', 'Download was successfully disabled');
++define('TEXT_MORE', '... more');
++
++define('TEXT_INFO_IP_ADDRESS', 'IP Address: ');
++define('TEXT_DELETE_CVV_FROM_DATABASE','Delete CVV from database');
++define('TEXT_DELETE_CVV_REPLACEMENT','Deleted');
++define('TEXT_MASK_CC_NUMBER','Mask this number');
++
++define('TEXT_INFO_EXPIRED_DATE', 'Expired Date:<br />');
++define('TEXT_INFO_EXPIRED_COUNT', 'Expired Count:<br />');
++
++define('TABLE_HEADING_CUSTOMER_COMMENTS', 'Customer<br />Comments');
++define('TEXT_COMMENTS_YES', 'Customer Comments - YES');
++define('TEXT_COMMENTS_NO', 'Customer Comments - NO');
++?>
+\ No newline at end of file
+diff -r efa88d01b1ae admin11/includes/languages/english/images/buttons/button_refresh.gif
+Binary file admin11/includes/languages/english/images/buttons/button_refresh.gif has changed
+diff -r efa88d01b1ae admin11/includes/languages/english/images/buttons/button_register.gif
+Binary file admin11/includes/languages/english/images/buttons/button_register.gif has changed
+diff -r efa88d01b1ae admin11/includes/languages/english/images/buttons/button_sticker.gif
+Binary file admin11/includes/languages/english/images/buttons/button_sticker.gif has changed
+diff -r efa88d01b1ae admin11/includes/languages/english/product.php
+--- a/admin11/includes/languages/english/product.php	Mon Mar 25 10:41:56 2013 +0100
++++ b/admin11/includes/languages/english/product.php	Fri Apr 26 11:39:33 2013 +0200
+@@ -97,6 +97,7 @@
+ define('TEXT_PRODUCTS_PRICE_NET', 'Products Price (Net):');
+ define('TEXT_PRODUCTS_PRICE_GROSS', 'Products Price (Gross):');
+ define('TEXT_PRODUCTS_WEIGHT', 'Products Shipping Weight:');
++define('TEXT_PRODUCTS_DIMENSION', 'Products Shipping Dimension:');
+ 
+ define('EMPTY_CATEGORY', 'Empty Category');
+ 
+diff -r efa88d01b1ae admin11/includes/modules/product/collect_info.php
+--- a/admin11/includes/modules/product/collect_info.php	Mon Mar 25 10:41:56 2013 +0100
++++ b/admin11/includes/modules/product/collect_info.php	Fri Apr 26 11:39:33 2013 +0200
+@@ -19,6 +19,7 @@
+                        'products_price' => '',
+                        'products_virtual' => DEFAULT_PRODUCT_PRODUCTS_VIRTUAL,
+                        'products_weight' => '',
++                       'products_dimension' => '',
+                        'products_date_added' => '',
+                        'products_last_modified' => '',
+                        'products_date_available' => '',
+@@ -46,7 +47,7 @@
+     if (isset($_GET['pID']) && empty($_POST)) {
+       $product = $db->Execute("select pd.products_name, pd.products_description, pd.products_url,
+                                       p.products_id, p.products_quantity, p.products_model,
+-                                      p.products_image, p.products_price, p.products_virtual, p.products_weight,
++                                      p.products_image, p.products_price, p.products_virtual, p.products_weight, p.products_dimension,
+                                       p.products_date_added, p.products_last_modified,
+                                       date_format(p.products_date_available, '%Y-%m-%d') as
+                                       products_date_available, p.products_status, p.products_tax_class_id,
+@@ -482,6 +483,10 @@
+             <td class="main"><?php echo zen_draw_separator('pixel_trans.gif', '24', '15') . '&nbsp;' . zen_draw_input_field('products_weight', $pInfo->products_weight); ?></td>
+           </tr>
+           <tr>
++            <td class="main"><?php echo TEXT_PRODUCTS_DIMENSION; ?></td>
++            <td class="main"><?php echo zen_draw_separator('pixel_trans.gif', '24', '15') . '&nbsp;' . zen_draw_input_field('products_dimension', $pInfo->products_dimension); ?></td>
++          </tr>
++          <tr>
+             <td colspan="2"><?php echo zen_draw_separator('pixel_trans.gif', '1', '10'); ?></td>
+           </tr>
+           <tr>
+diff -r efa88d01b1ae admin11/includes/modules/product/preview_info.php
+--- a/admin11/includes/modules/product/preview_info.php	Mon Mar 25 10:41:56 2013 +0100
++++ b/admin11/includes/modules/product/preview_info.php	Fri Apr 26 11:39:33 2013 +0200
+@@ -4,7 +4,7 @@
+  * @copyright Copyright 2003-2012 Zen Cart Development Team
+  * @copyright Portions Copyright 2003 osCommerce
+  * @license http://www.zen-cart.com/license/2_0.txt GNU Public License V2.0
+- * @version GIT: $Id: Author: Ian Wilson  Tue Aug 7 15:42:16 2012 +0100 Modified in v1.5.1 $
++ * @version GIT: $Id: Author: Ian Wilson  Tue Aug 7 15:42:16 2012 +0100 Modified in v1.5.1 $
+  */
+ if (!defined('IS_ADMIN_FLAG')) {
+   die('Illegal Access');
+@@ -18,7 +18,7 @@
+       $product = $db->Execute("select p.products_id, pd.language_id, pd.products_name,
+                                       pd.products_description, pd.products_url, p.products_quantity,
+                                       p.products_model, p.products_image, p.products_price, p.products_virtual,
+-                                      p.products_weight, p.products_date_added, p.products_last_modified,
++                                      p.products_weight, p.products_dimension, p.products_date_added, p.products_last_modified,
+                                       p.products_date_available, p.products_status, p.manufacturers_id,
+                                       p.products_quantity_order_min, p.products_quantity_order_units, p.products_priced_by_attribute,
+                                       p.product_is_free, p.product_is_call, p.products_quantity_mixed,
+diff -r efa88d01b1ae admin11/includes/modules/update_product.php
+--- a/admin11/includes/modules/update_product.php	Mon Mar 25 10:41:56 2013 +0100
++++ b/admin11/includes/modules/update_product.php	Fri Apr 26 11:39:33 2013 +0200
+@@ -33,6 +33,7 @@
+                             'products_price' => $products_price,
+                             'products_date_available' => $products_date_available,
+                             'products_weight' => $products_weight,
++                            'products_dimension' => zen_db_prepare_input($_POST['products_dimension']),
+                             'products_status' => zen_db_prepare_input((int)$_POST['products_status']),
+                             'products_virtual' => zen_db_prepare_input((int)$_POST['products_virtual']),
+                             'products_tax_class_id' => zen_db_prepare_input((int)$_POST['products_tax_class_id']),
+diff -r efa88d01b1ae includes/classes/order.php
+--- a/includes/classes/order.php	Mon Mar 25 10:41:56 2013 +0100
++++ b/includes/classes/order.php	Fri Apr 26 11:39:33 2013 +0200
+@@ -120,7 +120,8 @@
+                         'last_modified' => $order->fields['last_modified'],
+                         'total' => $order->fields['order_total'],
+                         'tax' => $order->fields['order_tax'],
+-                        'ip_address' => $order->fields['ip_address']
++                        'ip_address' => $order->fields['ip_address'],
++                        'id' => $order_id
+                         );
+ 
+     $this->customer = array('id' => $order->fields['customers_id'],
+@@ -641,6 +642,22 @@
+                             'ip_address' => $_SESSION['customers_ip_address'] . ' - ' . $_SERVER['REMOTE_ADDR']
+                             );
+ 
++    if (isset($_SESSION['shipping']['id']) && $_SESSION['shipping']['id'] == 'easypack24_easypack24') {
++        $sql_data_array['delivery_name'] = $_SESSION['easypack24_machine_id'];
++        $sql_data_array['delivery_company'] = '';
++        $sql_data_array['delivery_street_address'] = $_SESSION['easypack24_address'];
++        $sql_data_array['delivery_suburb'] = '';
++        $sql_data_array['delivery_city'] = $_SESSION['easypack24_city'];
++        $sql_data_array['delivery_postcode'] = '';
++        $sql_data_array['delivery_state'] = $_SESSION['easypack24_postcode'];
++        $sql_data_array['delivery_country'] = '';
++        $sql_data_array['customers_telephone'] = $_SESSION['easypack24_receiver_phone'];
++
++        require_once(DIR_WS_FUNCTIONS . 'easypack24.php');
++        $easypack24_helper = new Easypack24HelperData();
++        $parcelSize = $easypack24_helper->calculateParcelSize($_SESSION['cart']->get_dimension(), MODULE_SHIPPING_EASYPACK24_SIZE_A, MODULE_SHIPPING_EASYPACK24_SIZE_B, MODULE_SHIPPING_EASYPACK24_SIZE_C);
++        $sql_data_array['easypack24_parcel_size'] = $parcelSize['parcelSize'];
++    }
+ 
+     zen_db_perform(TABLE_ORDERS, $sql_data_array);
+ 
+diff -r efa88d01b1ae includes/classes/shopping_cart.php
+--- a/includes/classes/shopping_cart.php	Mon Mar 25 10:41:56 2013 +0100
++++ b/includes/classes/shopping_cart.php	Fri Apr 26 11:39:33 2013 +0200
+@@ -579,6 +579,40 @@
+     return substr($product_id_list, 2);
+   }
+   /**
++   * Method to return dimension
++   *
++   * @return void
++   * @global object access to the db object
++   */
++  function get_dimension() {
++      global $db;
++
++      if (!is_array($this->contents)) return 0;
++
++      $result = array();
++
++      reset($this->contents);
++      while (list($products_id, ) = each($this->contents)) {
++          $qty = $this->contents[$products_id]['qty'];
++
++          $product_query = "select products_dimension from " . TABLE_PRODUCTS . " where products_id = '" . (int)$products_id . "'";
++
++          if ($product = $db->Execute($product_query)) {
++              $dimension = $product->fields['products_dimension'];
++
++              $dim = explode('x', strtolower(trim($dimension)));
++              $length = (float)trim($dim[0]);
++              $width = (float)trim($dim[1]);
++              $height = (float)trim($dim[2]);
++
++              for ($i = 0; $i < $qty; $i++) {
++                array_push($result, array('width' => $width, 'height' => $height, 'length' => $length));
++              }
++          }
++      }
++      return $result;
++  }
++  /**
+    * Method to calculate cart totals(price and weight)
+    *
+    * @return void
+@@ -1092,7 +1126,7 @@
+     reset($this->contents);
+     while (list($products_id, ) = each($this->contents)) {
+       $products_query = "select p.products_id, p.master_categories_id, p.products_status, pd.products_name, p.products_model, p.products_image,
+-                                  p.products_price, p.products_weight, p.products_tax_class_id,
++                                  p.products_price, p.products_weight, p.products_dimension, p.products_tax_class_id,
+                                   p.products_quantity_order_min, p.products_quantity_order_units, p.products_quantity_order_max,
+                                   p.product_is_free, p.products_priced_by_attribute,
+                                   p.products_discount_type, p.products_discount_type_from
+@@ -1250,6 +1284,7 @@
+         //                                    'quantity' => $this->contents[$products_id]['qty'],
+                                   'quantity' => $new_qty,
+                                   'weight' => $products->fields['products_weight'] + $this->attributes_weight($products_id),
++                                  'dimension' => $products->fields['products_dimension'],
+                                   // fix here
+                                   'final_price' => ($products_price + $this->attributes_price($products_id)),
+                                   'onetime_charges' => ($this->attributes_price_onetime_charges($products_id, $new_qty)),
+diff -r efa88d01b1ae includes/filenames.php
+--- a/includes/filenames.php	Mon Mar 25 10:41:56 2013 +0100
++++ b/includes/filenames.php	Fri Apr 26 11:39:33 2013 +0200
+@@ -100,6 +100,7 @@
+ define('FILENAME_MODULES', 'modules');
+ define('FILENAME_NEWSLETTERS', 'newsletters');
+ define('FILENAME_ORDERS', 'orders');
++define('FILENAME_EASYPACK24_ORDERS', 'easypack24_orders');
+ define('FILENAME_ORDERS_INVOICE', 'invoice');
+ define('FILENAME_ORDERS_PACKINGSLIP', 'packingslip');
+ define('FILENAME_ORDERS_STATUS', 'orders_status');
+diff -r efa88d01b1ae includes/functions/easypack24.php
+--- /dev/null	Thu Jan 01 00:00:00 1970 +0000
++++ b/includes/functions/easypack24.php	Fri Apr 26 11:39:33 2013 +0200
+@@ -0,0 +1,264 @@
++<?php
++
++define(EASYPACK24_INTEGRATION_ID, 'opencart-1.x');
++
++class Easypack24HelperData
++{
++
++    private function sendRequest($apiKey, $params = array())
++    {
++        $params['params']['description2'] = EASYPACK24_INTEGRATION_ID;
++        $params = array_merge(
++            array(
++                'url' => $params['url'],
++                'token' => $apiKey,
++                'methodType' => $params['methodType'],
++                'params' => $params['params']
++            ),
++            $params
++        );
++
++        $ch = curl_init();
++
++        switch ($params['methodType']) {
++            case 'GET':
++                curl_setopt($ch, CURLOPT_HTTPHEADER, array('X-HTTP-Method-Override: GET'));
++                $getParams = null;
++                if (!empty($params['params'])) {
++                    foreach ($params['params'] as $field_name => $field_value) {
++                        $getParams .= $field_name . '=' . urlencode($field_value) . '&';
++                    }
++                    curl_setopt($ch, CURLOPT_URL, $params['url'] . '?token=' . $params['token'] . '&' . $getParams);
++                } else {
++                    curl_setopt($ch, CURLOPT_URL, $params['url'] . '?token=' . $params['token']);
++                }
++                curl_setopt($ch, CURLOPT_CUSTOMREQUEST, 'GET');
++                break;
++            case 'POST':
++                $string = json_encode($params['params']);
++                curl_setopt($ch, CURLOPT_HTTPHEADER, array('X-HTTP-Method-Override: POST'));
++                curl_setopt($ch, CURLOPT_URL, $params['url'] . '?token=' . $params['token']);
++                curl_setopt($ch, CURLOPT_POST, true);
++                curl_setopt($ch, CURLOPT_POSTFIELDS, $string);
++                curl_setopt($ch, CURLOPT_CUSTOMREQUEST, 'POST');
++                curl_setopt($ch, CURLOPT_HTTPHEADER, array(
++                        'Content-Type: application/json',
++                        'Content-Length: ' . strlen($string))
++                );
++                break;
++            case 'PUT':
++                $string = json_encode($params['params']);
++                curl_setopt($ch, CURLOPT_HTTPHEADER, array('X-HTTP-Method-Override: PUT'));
++                curl_setopt($ch, CURLOPT_URL, $params['url'] . '?token=' . $params['token']);
++                curl_setopt($ch, CURLOPT_POST, true);
++                curl_setopt($ch, CURLOPT_POSTFIELDS, $string);
++                curl_setopt($ch, CURLOPT_CUSTOMREQUEST, 'PUT');
++                curl_setopt($ch, CURLOPT_HTTPHEADER, array(
++                        'Content-Type: application/json',
++                        'Content-Length: ' . strlen($string))
++                );
++                break;
++        }
++
++        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
++        return array(
++            'result' => json_decode(curl_exec($ch)),
++            'info' => curl_getinfo($ch),
++            'errno' => curl_errno($ch),
++            'error' => curl_error($ch)
++        );
++    }
++
++    public function registerParcel($apiKey, $apiUrl, $phone, $email, $boxMachineName, $parcelSize)
++    {
++        $apiUrl = $this->cleanUrl($apiUrl);
++
++        $response = $this->sendRequest($apiKey,
++            array(
++                'url' => $apiUrl . 'parcels',
++                'methodType' => 'POST',
++                'params' => array(
++                    'receiver' => array(
++                        'phone' => $phone,
++                        'email' => $email
++                    ),
++                    'size' => $parcelSize,
++                    'tmp_id' => '1',
++                    'target_machine' => $boxMachineName,
++                    'description' => 'e-commerce shop integration'
++                )
++            )
++        );
++
++        if ($response['info']['http_code'] == 201 || $response['info']['http_code'] == 204) {
++            return array('id' => $response['result']->id);
++        } else {
++            return array('error' => 1);
++        }
++    }
++
++    public function refreshParcel($apiKey, $apiUrl, $parcelId)
++    {
++        $apiUrl = $this->cleanUrl($apiUrl);
++
++        $response = $this->sendRequest($apiKey,
++            array(
++                'url' => $apiUrl . 'parcels/' . $parcelId,
++                'methodType' => 'GET',
++                'params' => array()
++            )
++        );
++
++        if ($response['info']['http_code'] == 200) {
++            return array('status' => $response['result']->status,
++                'boxMachineName' => $response['result']->target_machine,
++                'parcelSize' => $response['result']->size);
++        } else {
++            return array('error' => 1);
++        }
++    }
++
++    public function cancelParcel($apiKey, $apiUrl, $parcelId)
++    {
++        $apiUrl = $this->cleanUrl($apiUrl);
++
++        $response = $this->sendRequest($apiKey,
++            array(
++                'url' => $apiUrl . 'parcels',
++                'methodType' => 'PUT',
++                'params' => array(
++                    'id' => $parcelId,
++                    'status' => 'canceled'
++                )
++            )
++        );
++
++        if ($response['info']['http_code'] == 201 || $response['info']['http_code'] == 204) {
++            return array();
++        } else {
++            return array('error' => 1);
++        }
++    }
++
++    public function getSticker($apiKey, $apiUrl, $parcelId)
++    {
++        $apiUrl = $this->cleanUrl($apiUrl);
++
++        $response = $this->sendRequest($apiKey,
++            array(
++                'url' => $apiUrl . 'stickers/' . $parcelId,
++                'methodType' => 'GET',
++                'params' => array(
++                    'format' => 'Pdf',
++                    'type' => 'normal'
++                )
++            )
++        );
++
++        if ($response['info']['http_code'] == 200) {
++            return array('pdf' => base64_decode($response['result']));
++        } else {
++            return array('error' => 1);
++        }
++    }
++
++    public function payForParcel($apiKey, $apiUrl, $parcelId)
++    {
++        $apiUrl = $this->cleanUrl($apiUrl);
++
++        $response = $this->sendRequest($apiKey,
++            array(
++                'url' => $apiUrl . 'parcels/' . $parcelId . '/pay',
++                'methodType' => 'POST',
++                'params' => array()
++            )
++        );
++
++        if ($response['info']['http_code'] == 201 || $response['info']['http_code'] == 204) {
++            return array();
++        } else {
++            return array('error' => 1);
++        }
++    }
++
++    public function getBoxMachines($apiKey, $apiUrl)
++    {
++        $apiUrl = $this->cleanUrl($apiUrl);
++
++        $response = $this->sendRequest($apiKey,
++            array(
++                'url' => $apiUrl . 'machines',
++                'methodType' => 'GET',
++                'params' => array()
++            )
++        );
++
++        return $response;
++    }
++
++    private function dump($response)
++    {
++        echo '<pre>';
++        var_dump($response);
++        echo '</pre>';
++    }
++
++    private function cleanUrl($apiUrl)
++    {
++        if ($apiUrl[strlen($apiUrl) - 1] != '/') {
++            $apiUrl .= '/';
++        }
++        return $apiUrl;
++    }
++
++    public static function calculateParcelSize($productDimensions = array(), $maxDimensionA, $maxDimensionB, $maxDimensionC)
++    {
++        $error = null;
++
++        if (!empty($productDimensions)) {
++            $a = self::explodeDimension($maxDimensionA);
++            $b = self::explodeDimension($maxDimensionB);
++            $c = self::explodeDimension($maxDimensionC);
++
++            if ($c['width'] == 0 || $c['height'] == 0 || $c['depth'] == 0) {
++                $error = 1;
++            }
++
++            $sum = 0;
++            foreach ($productDimensions as $product) {
++                if ($product['width'] > $c['width'] || $product['height'] > $c['height'] || $product['depth'] > $c['depth']) {
++                    $error = 1;
++                }
++
++                $sum += $product['width'] + $product['height'] + $product['depth'];
++                if ($sum > $c['sum']) {
++                    $error = 1;
++                }
++            }
++
++            if ($sum <= $a['sum']) {
++                $parcelSize = 'A';
++            } elseif ($sum <= $b['sum']) {
++                $parcelSize = 'B';
++            } elseif ($sum <= $c['sum']) {
++                $parcelSize = 'C';
++            } else {
++                $error = 1;
++            }
++        }
++
++        return array('parcelSize' => $parcelSize, 'error' => $error);
++    }
++
++    public static function explodeDimension($dimension)
++    {
++        $exploded = explode('x', strtolower(trim($dimension)));
++        $width = (float)trim(@$exploded[0]);
++        $height = (float)trim(@$exploded[1]);
++        $depth = (float)trim(@$exploded[2]);
++        $sum = $width + $height + $depth;
++        return array('sum' => $sum, 'width' => $width, 'height' => $height, 'depth' => $depth);
++    }
++}
++
++?>
+\ No newline at end of file
+diff -r efa88d01b1ae includes/modules/pages/checkout_shipping/header_php.php
+--- a/includes/modules/pages/checkout_shipping/header_php.php	Mon Mar 25 10:41:56 2013 +0100
++++ b/includes/modules/pages/checkout_shipping/header_php.php	Fri Apr 26 11:39:33 2013 +0200
+@@ -131,7 +131,6 @@
+     $comments = $_SESSION['comments'];
+   }
+ 
+-
+ // process the selected shipping method
+   if ( isset($_POST['action']) && ($_POST['action'] == 'process') ) {
+     if (zen_not_null($_POST['comments'])) {
+@@ -142,6 +141,26 @@
+ 
+     if ( (zen_count_shipping_modules() > 0) || ($free_shipping == true) ) {
+       if ( (isset($_POST['shipping'])) && (strpos($_POST['shipping'], '_')) ) {
++        if ($_POST['shipping'] == 'easypack24_easypack24') {
++            if (empty($_POST['easypack24_machine_id'])) {
++                $easypack24_error = 'No terminal was selected. Please, select a terminal from a list or a map.';
++                $quote['error'] = $easypack24_error;
++            } else if (empty($_POST['easypack24_receiver_phone']) || !preg_match('/^[0-9]{9}$/', $_POST['easypack24_receiver_phone'])) {
++                $easypack24_error = 'No mobile number was given or number has wrong format. Please, enter a mobile number.';
++                $quote['error'] = $easypack24_error;
++            } else {
++                $machine_id = $_POST['easypack24_machine_id'];
++                $machine = $_SESSION['easypack24_all_machines'][$machine_id];
++
++                $_SESSION['easypack24_machine_id'] = $machine_id;
++                $_SESSION['easypack24_receiver_phone'] = $_POST['easypack24_receiver_phone'];
++                $_SESSION['easypack24_address'] = $machine['address']['street'] . ' ' . $machine['address']['building_number'] . ' ' . $machine['address']['flat_number'];
++                $_SESSION['easypack24_city'] = $machine['address']['city'];
++                $_SESSION['easypack24_postcode'] = $machine['address']['postcode'];
++                $_SESSION['easypack24_all_machines'] = null;
++            }
++        }
++
+         /**
+          * check to be sure submitted data hasn't been tampered with
+          */
+@@ -153,12 +172,15 @@
+ 
+         list($module, $method) = explode('_', $_SESSION['shipping']);
+         if ( is_object($$module) || ($_SESSION['shipping'] == 'free_free') ) {
+-          if ($_SESSION['shipping'] == 'free_free') {
+-            $quote[0]['methods'][0]['title'] = FREE_SHIPPING_TITLE;
+-            $quote[0]['methods'][0]['cost'] = '0';
+-          } else {
+-            $quote = $shipping_modules->quote($method, $module);
++          if (!isset($quote['error'])) {
++            if ($_SESSION['shipping'] == 'free_free') {
++                $quote[0]['methods'][0]['title'] = FREE_SHIPPING_TITLE;
++                $quote[0]['methods'][0]['cost'] = '0';
++              } else {
++                $quote = $shipping_modules->quote($method, $module);
++              }
+           }
++
+           if (isset($quote['error'])) {
+             $_SESSION['shipping'] = '';
+           } else {
+@@ -184,6 +206,62 @@
+ // get all available shipping quotes
+   $quotes = $shipping_modules->quote();
+ 
++// easypack24 specific code
++foreach ($quotes as $quote) {
++    if ($quote['id'] == 'easypack24') {
++        require_once(DIR_WS_FUNCTIONS . 'easypack24.php');
++
++        $easypack24_helper = new Easypack24HelperData();
++
++        $allMachines = $easypack24_helper->getBoxMachines(MODULE_SHIPPING_EASYPACK24_API_KEY, MODULE_SHIPPING_EASYPACK24_API_URL);
++
++        $city = $order->delivery['city'];
++        $phone = $order->customer['telephone'];
++        $postcode = $order->delivery['postcode'];
++
++        $resultMachines = array();
++        $resultMachinesDetails = array();
++        $resultFilteredMachines = array();
++        if (is_array(@$allMachines['result']) && !empty($allMachines['result'])) {
++            foreach ($allMachines['result'] as $machine) {
++                $resultMachines[$machine->id] = $machine->id . ', ' . @$machine->address->city . ', ' . @$machine->address->street;
++
++                $resultMachinesDetails[$machine->id] = array(
++                    'id' => $machine->id,
++                    'address' => array(
++                        'building_number' => isset($machine->address->building_number) ? $machine->address->building_number : '',
++                        'flat_number' => isset($machine->address->flat_number) ? $machine->address->flat_number : '',
++                        'postcode' => isset($machine->address->post_code) ? $machine->address->post_code : '',
++                        'province' => isset($machine->address->province) ? $machine->address->province : '',
++                        'street' => isset($machine->address->street) ? $machine->address->street : '',
++                        'city' => isset($machine->address->city) ? $machine->address->city : ''
++                    )
++                );
++
++                if ($machine->address->post_code == $postcode || $machine->address->city == $city) {
++                    $resultFilteredMachines[$machine->id] = $machine->id . ', ' . @$machine->address->city . ', ' . @$machine->address->street;
++                }
++            }
++        }
++
++        if (is_array(@$resultFilteredMachines) && !empty($resultFilteredMachines)) {
++            $defaultSelect = 'Select Machine...';
++        } else {
++            $defaultSelect = 'No terminals in your city';
++        }
++
++        $easypack24_machines = $resultFilteredMachines;
++        $easypack24_parcelTargetAllMachinesId = $resultMachines;
++        $easypack24_parcelTargetMachinesId = $resultFilteredMachines;
++        $easypack24_machine_id = -1;
++        $easypack24_defaultSelect = $defaultSelect;
++        $easypack24_receiver_phone = $phone;
++
++        $_SESSION['easypack24_all_machines'] = $resultMachinesDetails;
++    }
++}
++// end of easypack24 specific code
++
+   // check that the currently selected shipping method is still valid (in case a zone restriction has disabled it, etc)
+   if (isset($_SESSION['shipping']) && $_SESSION['shipping'] != FALSE && $_SESSION['shipping'] != '') {
+     $checklist = array();
+diff -r efa88d01b1ae includes/modules/shipping/easypack24.php
+--- a/includes/modules/shipping/easypack24.php	Mon Mar 25 10:41:56 2013 +0100
++++ b/includes/modules/shipping/easypack24.php	Fri Apr 26 11:39:33 2013 +0200
+@@ -41,7 +41,7 @@
+ 
+ // class methods
+     function quote($method = '') {
+-      global $order;
++      global $order, $shipping_weight;
+ 
+       $this->quotes = array('id' => $this->code,
+                             'module' => MODULE_SHIPPING_EASYPACK24_TEXT_TITLE,
+@@ -54,6 +54,29 @@
+ 
+       if (zen_not_null($this->icon)) $this->quotes['icon'] = zen_image($this->icon, $this->title);
+ 
++      $weight = $shipping_weight;//$this->cart->getWeight();
++      $max_weight = MODULE_SHIPPING_EASYPACK24_MAX_WEIGHT;
++
++      if (!$weight || $weight <= 0 || $weight > $max_weight) {
++          $this->quotes['error'] = 'Max weight exceeded or no weight set for chosen items. Weight limit is: ' . $max_weight;
++      }
++
++      $dimension_sum = 0;
++      $dimension = $_SESSION['cart']->get_dimension();
++      foreach ($dimension as $d) {
++          $dimension_sum = $d['width'] + $d['height'] + $d['length'];
++      }
++
++      $max_dimension_array = explode('x', strtolower(trim(MODULE_SHIPPING_EASYPACK24_SIZE_C)));
++      $max_length = (float)trim($max_dimension_array[0]);
++      $max_width = (float)trim($max_dimension_array[1]);
++      $max_height = (float)trim($max_dimension_array[2]);
++      $max_dimension = $max_length + $max_width + $max_height;
++
++      if ($dimension_sum > $max_dimension) {
++          $this->quotes['error'] = 'Max dimension exceeded or no dimension set for chosen items . Dimension limit is: ' . MODULE_SHIPPING_EASYPACK24_SIZE_C;
++      }
++
+       return $this->quotes;
+     }
+ 
+@@ -68,14 +91,14 @@
+ 
+     function install() {
+       global $db;
+-      $db->Execute("insert into " . TABLE_CONFIGURATION . " (configuration_title, configuration_key, configuration_value, configuration_description, configuration_group_id, sort_order, set_function, date_added) values ('Enable Flat Shipping', 'MODULE_SHIPPING_EASYPACK24_STATUS', 'True', 'Do you want to offer flat rate shipping?', '6', '0', 'zen_cfg_select_option(array(\'True\', \'False\'), ', now())");
++      $db->Execute("insert into " . TABLE_CONFIGURATION . " (configuration_title, configuration_key, configuration_value, configuration_description, configuration_group_id, sort_order, set_function, date_added) values ('Enable InPost Parcel Lockers 24/7 Shipping', 'MODULE_SHIPPING_EASYPACK24_STATUS', 'True', 'Do you want to offer InPost Parcel Lockers 24/7 shipping?', '6', '0', 'zen_cfg_select_option(array(\'True\', \'False\'), ', now())");
+       $db->Execute("insert into " . TABLE_CONFIGURATION . " (configuration_title, configuration_key, configuration_value, configuration_description, configuration_group_id, sort_order, date_added) values ('Api url', 'MODULE_SHIPPING_EASYPACK24_API_URL', 'http://api.easypack24.net/', 'URL for InPost API.', '6', '0', now())");
+       $db->Execute("insert into " . TABLE_CONFIGURATION . " (configuration_title, configuration_key, configuration_value, configuration_description, configuration_group_id, sort_order, date_added) values ('Api key', 'MODULE_SHIPPING_EASYPACK24_API_KEY', '', 'Your store key for InPost API.', '6', '0', now())");
+       $db->Execute("insert into " . TABLE_CONFIGURATION . " (configuration_title, configuration_key, configuration_value, configuration_description, configuration_group_id, sort_order, date_added) values ('Shipping Cost', 'MODULE_SHIPPING_EASYPACK24_COST', '14.00', 'The shipping cost for all orders using this shipping method.', '6', '0', now())");
+-      $db->Execute("insert into " . TABLE_CONFIGURATION . " (configuration_title, configuration_key, configuration_value, configuration_description, configuration_group_id, sort_order, date_added) values ('Max dimension - size A', 'MODULE_SHIPPING_EASYPACK24_MAX_WEIGHT', '25', 'Maximal weight of parcel.', '6', '0', now())");
+-      $db->Execute("insert into " . TABLE_CONFIGURATION . " (configuration_title, configuration_key, configuration_value, configuration_description, configuration_group_id, sort_order, date_added) values ('Max dimension - size A', 'MODULE_SHIPPING_EASYPACK24_SIZE_A', '8x38x64', 'Max dimension for parcel of size A (width x height x depth).', '6', '0', now())");
+-      $db->Execute("insert into " . TABLE_CONFIGURATION . " (configuration_title, configuration_key, configuration_value, configuration_description, configuration_group_id, sort_order, date_added) values ('Max dimension - size B', 'MODULE_SHIPPING_EASYPACK24_SIZE_B', '19x38x64', 'Max dimension for parcel of size B (width x height x depth).', '6', '0', now())");
+-      $db->Execute("insert into " . TABLE_CONFIGURATION . " (configuration_title, configuration_key, configuration_value, configuration_description, configuration_group_id, sort_order, date_added) values ('Max dimension - size C', 'MODULE_SHIPPING_EASYPACK24_SIZE_C', '41x38x64', 'Max dimension for parcel of size C (width x height x depth).', '6', '0', now())");
++      $db->Execute("insert into " . TABLE_CONFIGURATION . " (configuration_title, configuration_key, configuration_value, configuration_description, configuration_group_id, sort_order, date_added) values ('Max weight (kg)', 'MODULE_SHIPPING_EASYPACK24_MAX_WEIGHT', '25', 'Maximal weight of parcel.', '6', '0', now())");
++      $db->Execute("insert into " . TABLE_CONFIGURATION . " (configuration_title, configuration_key, configuration_value, configuration_description, configuration_group_id, sort_order, date_added) values ('Max dimension - size S (cm)', 'MODULE_SHIPPING_EASYPACK24_SIZE_A', '8x38x64', 'Max dimension for parcel of size S (width x height x depth).', '6', '0', now())");
++      $db->Execute("insert into " . TABLE_CONFIGURATION . " (configuration_title, configuration_key, configuration_value, configuration_description, configuration_group_id, sort_order, date_added) values ('Max dimension - size M (cm)', 'MODULE_SHIPPING_EASYPACK24_SIZE_B', '19x38x64', 'Max dimension for parcel of size M (width x height x depth).', '6', '0', now())");
++      $db->Execute("insert into " . TABLE_CONFIGURATION . " (configuration_title, configuration_key, configuration_value, configuration_description, configuration_group_id, sort_order, date_added) values ('Max dimension - size L (cm)', 'MODULE_SHIPPING_EASYPACK24_SIZE_C', '41x38x64', 'Max dimension for parcel of size L (width x height x depth).', '6', '0', now())");
+       $db->Execute("insert into " . TABLE_CONFIGURATION . " (configuration_title, configuration_key, configuration_value, configuration_description, configuration_group_id, sort_order, use_function, set_function, date_added) values ('Tax Class', 'MODULE_SHIPPING_EASYPACK24_TAX_CLASS', '0', 'Use the following tax class on the shipping fee.', '6', '0', 'zen_get_tax_class_title', 'zen_cfg_pull_down_tax_classes(', now())");
+       $db->Execute("insert into " . TABLE_CONFIGURATION . " (configuration_title, configuration_key, configuration_value, configuration_description, configuration_group_id, sort_order, set_function, date_added) values ('Tax Basis', 'MODULE_SHIPPING_EASYPACK24_TAX_BASIS', 'Shipping', 'On what basis is Shipping Tax calculated. Options are<br />Shipping - Based on customers Shipping Address<br />Billing Based on customers Billing address<br />Store - Based on Store address if Billing/Shipping Zone equals Store zone', '6', '0', 'zen_cfg_select_option(array(\'Shipping\', \'Billing\', \'Store\'), ', now())");
+       $db->Execute("insert into " . TABLE_CONFIGURATION . " (configuration_title, configuration_key, configuration_value, configuration_description, configuration_group_id, sort_order, use_function, set_function, date_added) values ('Shipping Zone', 'MODULE_SHIPPING_EASYPACK24_ZONE', '0', 'If a zone is selected, only enable this shipping method for that zone.', '6', '0', 'zen_get_zone_class_title', 'zen_cfg_pull_down_zone_classes(', now())");
+diff -r efa88d01b1ae includes/templates/template_default/templates/tpl_checkout_shipping_default.php
+--- a/includes/templates/template_default/templates/tpl_checkout_shipping_default.php	Mon Mar 25 10:41:56 2013 +0100
++++ b/includes/templates/template_default/templates/tpl_checkout_shipping_default.php	Fri Apr 26 11:39:33 2013 +0200
+@@ -99,6 +99,88 @@
+ <?php echo zen_draw_radio_field('shipping', $quotes[$i]['id'] . '_' . $quotes[$i]['methods'][$j]['id'], $checked, 'id="ship-'.$quotes[$i]['id'] . '-' . str_replace(' ', '-', $quotes[$i]['methods'][$j]['id']) .'"'); ?>
+ <label for="ship-<?php echo $quotes[$i]['id'] . '-' . str_replace(' ', '-', $quotes[$i]['methods'][$j]['id']); ?>" class="checkboxLabel" ><?php echo $quotes[$i]['methods'][$j]['title']; ?></label>
+ <!--</div>-->
++
++<?php
++    if ($quotes[$i]['id'] == 'easypack24') {
++?>
++        <script src="//ajax.googleapis.com/ajax/libs/jquery/1.9.1/jquery.min.js"></script>
++        <script type="text/javascript">
++            function map_callback(value) {
++                var address = value.split(';');
++                var box_machine_name = document.value=address[0];
++                var box_machine_town = document.value=address[1];
++                var box_machine_street = document.value=address[2];
++
++                var is_value = 0;
++                document.getElementById('shipping_easypack24').value = box_machine_name;
++                var shipping_easypack24 = document.getElementById('shipping_easypack24');
++
++                for(i=0;i<shipping_easypack24.length;i++){
++                    if(shipping_easypack24.options[i].value == box_machine_name){
++                        shipping_easypack24.selectedIndex = i;
++                        is_value = 1;
++                    }
++                }
++
++                if (is_value == 0){
++                    shipping_easypack24.options[shipping_easypack24.options.length] = new Option(box_machine_name+','+box_machine_town+','+box_machine_street, box_machine_name);
++                    shipping_easypack24.selectedIndex = shipping_easypack24.length-1;
++                }
++            }
++            $.getScript("https://geowidget.inpost.co.uk/dropdown.php?user_function=map_callback");
++        </script>
++        <div id="shipping-easypack24">
++        <?php if (isset($easypack24_error)) { ?>
++        <br/><strong><?php echo $easypack24_error; ?></strong><br/>
++        <?php } ?>
++        <br/>
++        * <select id="shipping_easypack24" name="easypack24_machine_id">
++            <option value='' <?php if($easypack24_machine_id == ''){ echo "selected=selected";} ?>><?php echo $easypack24_defaultSelect;?></option>
++
++            <?php foreach($easypack24_parcelTargetMachinesId as $key => $easypack24_parcelTargetMachineId) { ?>
++                <option value='<?php echo $key ?>' <?php if($easypack24_machine_id == $easypack24_parcelTargetMachineId){ echo "selected=selected";} ?>><?php echo $easypack24_parcelTargetMachineId;?></option>
++            <?php } ?>
++        </select>
++        <br/>
++        <a href="#" onclick="openMap(); return false;">Map</a>
++        &nbsp|&nbsp<input type="checkbox" name="show_all_machines"> Show terminals in other cities
++        <br/><br/>
++        * Mobile (e.g. 523045856)<br/>
++        (07) <input type="text" name="easypack24_receiver_phone" value="<?php echo $easypack24_receiver_phone ?>" class="large-field" />
++        </div>
++        <script type="text/javascript">
++            $(document).ready(function(){
++                $('input[type="checkbox"][name="show_all_machines"]').click(function(){
++                    var machines_list_type = $(this).is(':checked');
++                    if(machines_list_type == true){
++                        var machines = {
++                            '' : 'Select Machine..',
++                            <?php foreach($easypack24_parcelTargetAllMachinesId as $key => $easypack24_parcelTargetAllMachineId) { ?>
++                            '<?php echo $key ?>' : '<?php echo addslashes($easypack24_parcelTargetAllMachineId) ?>',
++                            <?php } ?>
++                        };
++                    }else{
++                        var machines = {
++                            '' : 'Select Machine..',
++                            <?php foreach($easypack24_parcelTargetMachinesId as $key => $easypack24_parcelTargetMachineId) { ?>
++                            '<?php echo $key ?>' : '<?php echo addslashes($easypack24_parcelTargetMachineId) ?>',
++                            <?php } ?>
++                        };
++                    }
++
++                    $('#shipping_easypack24 option').remove();
++                    $.each(machines, function(val, text) {
++                        $('#shipping_easypack24').append(
++                            $('<option></option>').val(val).html(text)
++                        );
++                    });
++                });
++            });
++        </script>
++<?php
++    }
++?>
++
+ <br class="clearBoth" />
+ <?php
+             $radio_buttons++;
+@@ -131,4 +213,21 @@
+ <div class="buttonRow back"><?php echo '<strong>' . TITLE_CONTINUE_CHECKOUT_PROCEDURE . '</strong><br />' . TEXT_CONTINUE_CHECKOUT_PROCEDURE; ?></div>
+ 
+ </form>
+-</div>
+\ No newline at end of file
++</div>
++
++<script type="text/javascript">
++    $(document).ready(function(){
++        $('input[type="radio"][name="shipping"]').change(function() {
++            if (this.value == 'easypack24_easypack24') {
++                $('#shipping-easypack24').show();
++            } else {
++                $('#shipping-easypack24').hide();
++            }
++        });
++    });
++    if ($('input[type="radio"][name="shipping"]').val() == 'easypack24_easypack24') {
++        $('#shipping-easypack24').show();
++    } else {
++        $('#shipping-easypack24').hide();
++    }
++</script>
+\ No newline at end of file

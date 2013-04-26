@@ -1,0 +1,53 @@
+ZENCART EASYPACK24 INTEGRATION
+-----------------------------------------------------
+ 
+1. Download latest version of ZenCart from:
+            http://sourceforge.net/projects/zencart/files/
+ 
+   Integration was prepared and tested on version v1.5.1.
+ 
+2. Install ZenCart according to the provided instruction:
+            http://www.zen-cart.com/content.php?24-installing-zen-cart
+ 
+3. Add Easypack24 database columns and data (e.g. mysql -u zencart -p zencart):
+ 
+		    ALTER TABLE products ADD products_dimension varchar(16) AFTER products_weight;
+			ALTER TABLE orders ADD easypack24_parcel_id VARCHAR (50);
+			ALTER TABLE orders ADD easypack24_status VARCHAR (50);
+			ALTER TABLE orders ADD easypack24_parcel_size VARCHAR (1);
+			INSERT INTO admin_pages (page_key, language_key, main_page, menu_key, display_on_menu, sort_order) VALUES ('easypack24Order', 'BOX_CUSTOMERS_EASYPACK24_ORDERS', 'FILENAME_EASYPACK24_ORDERS', 'customers', 'Y', 8);
+ 
+   If you have set prefix for database tables add it to the above queries (e.g. "orders" -> "prefix_orders").
+ 
+4. Copy files from install directory to your ZenCart installation path:
+ 
+            cp -R ./install/* /your/zencart/path/
+ 
+5. Apply diff patch to your ZenCart installation:
+ 
+            cd /your/zencart/path
+            patch -p1 < zencart.patch
+ 
+6. Enable InPost Parcel Lockers 24/7 in admin panel:
+ 
+            go to http://www.your.host/adminXX (XX is your admin panel number generated during installation)
+            log in and go to Modules->Shipping
+            click "Install" on InPost Parcel Lockers 24/7
+            when it's done - click "Edit"
+            provide API url and key and other configuration fields
+            set Enabled to True
+           
+            Configuration fields:
+                        Api url (e.g. http://api.easypack24.net/)
+                        Api key
+                        Price (e.g. 14)
+                        Max weight (e.g. 25)
+                        Max dimension - size S (width x height x depth, e.g. 8x38x64)
+                        Max dimension - size L (e.g. 19x38x64)
+                        Max dimension - size L (e.g. 41x38x64)      
+                       
+    For managing parcels go to Customers -> InPost Parcel Lockers 24/7.
+                        
+7. Verify integration is working by going to checkout in ZenCart shop.
+ 
+
